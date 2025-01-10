@@ -5,7 +5,7 @@ import axios from "axios";
 // Load environment variables
 const CHATTRICK_BASE_URL = process.env.CHATTRICK_BASE_URL as string;
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN as string;
-//const PHONE_NUMBER_URL = process.env.PHONE_NUMBER_URL as string;
+const PHONE_NUMBER_URL = process.env.PHONE_NUMBER_URL as string;
 
 type ChatAcknowledgment = {
     status: string;
@@ -13,23 +13,21 @@ type ChatAcknowledgment = {
 };
 
 // Cache WebSocket connections for bot IDs
-const socketCache: Record<string, import('socket.io-client').Socket> = {};
+const socketCache: Record<string, ReturnType<typeof io>> = {};
 
 // Fetch chatbot configuration
-// async function fetchChatbotConfig(phoneNumber: string) {
-//     try {
-//         const response = await axios.get(
-//             `${PHONE_NUMBER_URL}/api/integrations/whatsapp?phone_number=${phoneNumber}`
-//         );
-//         console.log(`Phone number:`);
-//         console.log(response.data.data)
-
-//         return response.data.data;
-//     } catch (error) {
-//         console.error("Error fetching chatbot configuration:", error);
-//         throw new Error("Failed to fetch chatbot configuration");
-//     }
-// }
+async function fetchChatbotConfig(phoneNumber: string) {
+    try {
+        const response = await axios.get(
+            `${CHATTRICK_BASE_URL}/api/integrations/whatsapp?phone_number=${phoneNumber}`
+        );
+        console.log("Fetched chatbot configuration:", response.data.data);
+        return response.data.data;
+    } catch (error) {
+        console.error("Error fetching chatbot configuration:", error);
+        throw new Error("Failed to fetch chatbot configuration");
+    }
+}
 
 // GET handler for webhook verification
 export async function GET(req: NextRequest) {
@@ -62,20 +60,13 @@ export async function POST(req: NextRequest) {
             }
 
             // Fetch configuration for the given phone number
-            //const config = await fetchChatbotConfig(businessPhoneNumber);
-            // if (!config) {
-            //     console.error("No configuration found for phone number:", businessPhoneNumber);
-            //     return NextResponse.json({ error: "Configuration not found" }, { status: 404 });
-            // }
+            const config = await fetchChatbotConfig(businessPhoneNumber);
+            if (!config) {
+                console.error("No configuration found for phone number:", businessPhoneNumber);
+                return NextResponse.json({ error: "Configuration not found" }, { status: 404 });
+            }
 
-            // const { bot_id, graph_api_token } = config;
-
-            const bot_id = "048e197f-9817-47c0-992f-f7ee77c7a80e"
-            const graph_api_token = "EAAIL3ZAXFxxQBO2XKV3SfsNwhmCAWQKWM0YBnrpWrdJJjiIOU7O0kZAKlxU4lNgiDeKfvmQcBvpiU9J8aDv4uZCrBjKzal4mX0Qd5PRg3QBQzTegsp814DZA5bYxXJUtUWuHpI1JVLvdel31tlgS6gn2cwGiINamWYP6abTjrG4F13v45biB33pvFq3D99HgccMzfQrD9fh2"
-
-
-            console.log(`bot_id: ${bot_id}`);
-            console.log(`graph_api_token: ${graph_api_token}`);
+            const { bot_id, graph_api_token } = config;
 
             // Ensure a WebSocket connection exists for the bot ID
             if (!socketCache[bot_id]) {
@@ -83,19 +74,21 @@ export async function POST(req: NextRequest) {
                 socketCache[bot_id] = io(CHATTRICK_BASE_URL, {
                     path: "/api/chat",
                     query: { botId: bot_id },
+                    extraHeaders: {
+                        Referer: "https://whatsapp-integration-puce.vercel.app", // Replace with your actual referrer domain
+                    },
                 });
 
-                socketCache[bot_id].on("connect", () => {
-                    console.log(`Connected to WebSocket for bot ID ${bot_id}`);
-                });
+                const socket = socketCache[bot_id];
 
-                socketCache[bot_id].on("error", (error: Error) => {
-                    console.error(`WebSocket error for bot ID ${bot_id}:`, error);
-                });
-
-                socketCache[bot_id].on("disconnect", () => {
-                    console.log(`Disconnected WebSocket for bot ID ${bot_id}`);
-                });
+                // Log WebSocket events
+                socket.on("connect", () => console.log(`Connected to WebSocket for bot ID ${bot_id}`));
+                socket.on("error", (error: Error) =>
+                    console.error(`WebSocket error for bot ID ${bot_id}:`, error)
+                );
+                socket.on("disconnect", () =>
+                    console.log(`Disconnected WebSocket for bot ID ${bot_id}`)
+                );
             }
 
             const socket = socketCache[bot_id];
@@ -125,9 +118,6 @@ export async function POST(req: NextRequest) {
 
             // Send the bot's reply back to the user on WhatsApp
             console.log("Sending bot reply back to WhatsApp...");
-            console.log(botReply);
-            console.log(`phoneNumberId: ${phoneNumberId}`);
-            console.log(`message.from: ${message.from}`);
             await axios.post(
                 `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
                 {
