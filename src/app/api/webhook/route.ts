@@ -5,7 +5,7 @@ import axios from "axios";
 // Load environment variables
 const CHATTRICK_BASE_URL = process.env.CHATTRICK_BASE_URL as string;
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN as string;
-const PHONE_NUMBER_URL = process.env.PHONE_NUMBER_URL as string;
+
 
 type ChatAcknowledgment = {
     status: string;
