@@ -3,8 +3,8 @@ import { io, Socket } from "socket.io-client";
 import axios from "axios";
 
 const CHATTRICK_BASE_URL = process.env.CHATTRICK_BASE_URL as string;
-
-const SOCKET_TIMEOUT = 30000; // Increased timeout to 30 seconds
+const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN as string;
+const SOCKET_TIMEOUT = 30000; 
 const SOCKET_RECONNECTION_ATTEMPTS = 3;
 const SOCKET_RECONNECTION_DELAY = 1000;
 
@@ -138,6 +138,21 @@ type WhatsAppAPIError = {
     };
     message: string;
 };
+
+export async function GET(req: NextRequest) {
+    const mode = req.nextUrl.searchParams.get("hub.mode");
+    const token = req.nextUrl.searchParams.get("hub.verify_token");
+    const challenge = req.nextUrl.searchParams.get("hub.challenge");
+
+    if (mode === "subscribe" && token === WEBHOOK_VERIFY_TOKEN) {
+        console.log("Webhook verified successfully!");
+        return new Response(challenge, { status: 200 });
+    } else {
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+}
+
+
 
 export async function POST(req: NextRequest) {
     try {
