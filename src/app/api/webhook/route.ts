@@ -4,15 +4,36 @@ import axios from "axios";
 
 const CHATTRICK_BASE_URL = process.env.CHATTRICK_BASE_URL as string;
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN as string;
-const SOCKET_TIMEOUT = 30000; 
+const SOCKET_TIMEOUT = 30000;
 const SOCKET_RECONNECTION_ATTEMPTS = 3;
 const SOCKET_RECONNECTION_DELAY = 1000;
 
+type ConfigData = {
+    data: {
+        _id: string;
+        name: string;
+        whatsapp_business_id: string;
+        client_id: string;
+        business_phone_number: string;
+        bot_id: string;
+        graph_api_token: string;
+        app_id: string;
+        app_secret: string;
+        enabled: boolean;
+        created_at: string;
+        updated_at: string;
+    }
+}
 
-const fetchChatbotConfig = async (phoneNumber: string) => {
-    const response = await axios.get(`${CHATTRICK_BASE_URL}/api/integrations/whatsapp?phone_number=${phoneNumber}`);
-    console.log("Response:", response.data);
-    return response.data;
+const fetchChatbotConfig = async (phoneNumber: string): Promise<ConfigData | null> => {
+    try {
+        const response = await axios.get(`${CHATTRICK_BASE_URL}/api/integrations/whatsapp?phone_number=${phoneNumber}`);
+        console.log("Response:", response.data);
+        return response.data;
+    } catch (error) {
+        console.error("Error fetching chatbot config:", error);
+        throw error;
+    }
 };
 
 type ChatAcknowledgment = {
@@ -130,14 +151,7 @@ async function getBotResponse(socket: Socket, message: string): Promise<string> 
     });
 }
 
-// Add this type near the top of the file with other types
-type WhatsAppAPIError = {
-    response?: {
-        status: number;
-        data: unknown;
-    };
-    message: string;
-};
+
 
 export async function GET(req: NextRequest) {
     const mode = req.nextUrl.searchParams.get("hub.mode");
@@ -159,6 +173,7 @@ export async function POST(req: NextRequest) {
         const body = await req.json();
         const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
+        // Acknowledge the webhook request immediately
         if (!message || message.type !== "text") {
             return NextResponse.json({ status: "No text message found" }, { status: 200 });
         }
@@ -167,27 +182,67 @@ export async function POST(req: NextRequest) {
         const phoneNumberId = body.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
 
         if (!businessPhoneNumber || !phoneNumberId) {
-            return NextResponse.json({ error: "Missing required metadata" }, { status: 400 });
+            return NextResponse.json({ error: "Missing required metadata" }, { status: 200 }); // Respond with 200 to prevent retries
         }
 
-        const config = await fetchChatbotConfig(businessPhoneNumber);
+        // Acknowledge the webhook request immediately after basic validations
+        const acknowledgeResponse = NextResponse.json({ status: "Webhook received" }, { status: 200 });
+
+        // Continue processing asynchronously
+        processWebhook(body);
+
+        return acknowledgeResponse;
+    } catch (error) {
+        console.error("Error processing webhook:", error);
+        // Still respond with 200 to WhatsApp to avoid retries
+        return NextResponse.json({ status: "Error received" }, { status: 200 });
+    }
+}
+
+// Separate async function for processing the webhook
+async function processWebhook(body: {
+    entry?: [{
+        changes?: [{
+            value?: {
+                messages?: [{
+                    id: string;
+                    from: string;
+                    text: {
+                        body: string;
+                    };
+                    type: string;
+                }];
+                metadata?: {
+                    display_phone_number: string;
+                    phone_number_id: string;
+                };
+            };
+        }];
+    }];
+}) {
+    const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const businessPhoneNumber = body.entry?.[0]?.changes?.[0]?.value?.metadata?.display_phone_number;
+    const phoneNumberId = body.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
+
+    try {
+        if (!businessPhoneNumber) {
+            console.error("Business phone number is undefined");
+            return;
+        }
+
+        const config: ConfigData | null = await fetchChatbotConfig(businessPhoneNumber);
         if (!config) {
-            return NextResponse.json({ error: "Configuration not found" }, { status: 404 });
+            console.error("Configuration not found for business phone number:", businessPhoneNumber);
+            return;
         }
 
         const { bot_id, graph_api_token } = config.data;
 
-        // Add token validation
-        if (!graph_api_token || typeof graph_api_token !== 'string' || graph_api_token.trim() === '') {
+        if (!graph_api_token || typeof graph_api_token !== "string" || graph_api_token.trim() === "") {
             console.error("Invalid Graph API token:", graph_api_token);
-            return NextResponse.json({ error: "Invalid API token configuration" }, { status: 500 });
+            return;
         }
 
-        console.log("Bot ID:", bot_id);
-        console.log("Graph API Token length:", graph_api_token.length);
-        console.log("Graph API Token prefix:", graph_api_token.substring(0, 6) + "...");
-
-        // Get or create socket connection
         let socketEntry = socketCache[bot_id];
         if (!socketEntry || !socketEntry.isConnected) {
             await setupSocketConnection(bot_id);
@@ -196,80 +251,41 @@ export async function POST(req: NextRequest) {
 
         socketEntry.lastUsed = Date.now();
 
-        try {
-            const botReply = await getBotResponse(socketEntry.socket, message.text.body);
-            
-            console.log("Bot Reply:", botReply);
-            // Send reply to WhatsApp
-            const headers = {
-                Authorization: `Bearer ${graph_api_token}`,
-                'Content-Type': 'application/json'
-            };
-            console.log(`phoneNumberId: ${phoneNumberId}`);
-            try {
-                const response = await axios.post(
-                    `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
-                    {
-                        messaging_product: "whatsapp",
-                        to: message.from,
-                        text: { body: botReply },
-                        context: { message_id: message.id },
-                    },
-                    { headers }
-                );
-                console.log("WhatsApp API Response:", response.status, response.statusText);
-            } catch (error: unknown) {
-                const apiError = error as WhatsAppAPIError;
-                console.error("WhatsApp API Error:", {
-                    status: apiError.response?.status,
-                    data: apiError.response?.data,
-                    message: apiError.message
-                });
-                throw apiError;
-            }
-
-            // Mark as read
-            await axios.post(
-                `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
-                {
-                    messaging_product: "whatsapp",
-                    status: "read",
-                    message_id: message.id,
-                },
-                {
-                    headers: {
-                        Authorization: `Bearer ${graph_api_token}`,
-                    },
-                }
-            );
-
-            return NextResponse.json({ status: "Success" }, { status: 200 });
-        } catch (error) {
-            console.error("Error processing message:", error);
-
-            // Attempt to send error message to user
-            try {
-                await axios.post(
-                    `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
-                    {
-                        messaging_product: "whatsapp",
-                        to: message.from,
-                        text: { body: "Sorry, I'm having trouble processing your message. Please try again in a moment." },
-                    },
-                    {
-                        headers: {
-                            Authorization: `Bearer ${graph_api_token}`,
-                        },
-                    }
-                );
-            } catch (sendError) {
-                console.error("Failed to send error message:", sendError);
-            }
-
-            return NextResponse.json({ error: "Failed to process message" }, { status: 500 });
+        if (!message?.text?.body) {
+            console.error("Message text is undefined");
+            return;
         }
+
+        const botReply = await getBotResponse(socketEntry.socket, message.text.body);
+
+        const headers = {
+            Authorization: `Bearer ${graph_api_token}`,
+            "Content-Type": "application/json",
+        };
+
+        // Send reply to WhatsApp
+        await axios.post(
+            `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
+            {
+                messaging_product: "whatsapp",
+                to: message.from,
+                text: { body: botReply },
+                context: { message_id: message.id },
+            },
+            { headers }
+        );
+
+        // Mark message as read
+        await axios.post(
+            `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
+            {
+                messaging_product: "whatsapp",
+                status: "read",
+                message_id: message.id,
+            },
+            { headers }
+        );
     } catch (error) {
-        console.error("Error processing webhook:", error);
-        return NextResponse.json({ error: "Failed to process webhook" }, { status: 500 });
+        console.error("Error processing message:", error);
     }
 }
