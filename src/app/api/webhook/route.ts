@@ -4,12 +4,40 @@ import axios from "axios";
 
 const CHATTRICK_BASE_URL = process.env.CHATTRICK_BASE_URL as string;
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN as string;
-const SOCKET_TIMEOUT = 30000; 
+const SOCKET_TIMEOUT = 30000;
 const SOCKET_RECONNECTION_ATTEMPTS = 3;
 const SOCKET_RECONNECTION_DELAY = 1000;
 
-// In-memory deduplication cache
+type ChatbotConfigData = {
+    expiresAt: number,
+    fetching: boolean,
+    data: {
+        _id: string,
+        name: string,
+        whatsapp_business_id: string,
+        client_id: string,
+        business_phone_number: string,
+        bot_id: string,
+        graph_api_token: string,
+        app_id: string,
+        app_secret: string,
+        enabled: boolean,
+        created_at: string,
+        updated_at: string,
+        __v: number
+    }
+};
+
+
+
+// In-memory deduplication cache    
 const processedMessages = new Set<string>();
+
+// In-memory cache for chatbot configurations
+const chatbotConfigCache: Record<
+    string,
+    { data: ChatbotConfigData | null; expiresAt: number; fetching: boolean }
+> = {};
 
 // Enhanced socket cache with connection status
 interface SocketCacheEntry {
@@ -20,7 +48,7 @@ interface SocketCacheEntry {
 
 const socketCache: Record<string, SocketCacheEntry> = {};
 
-// Socket cleanup interval (every 5 minutes)
+// Periodic cleanup for inactive sockets
 setInterval(() => {
     const now = Date.now();
     Object.entries(socketCache).forEach(([botId, entry]) => {
@@ -32,10 +60,37 @@ setInterval(() => {
     });
 }, 300000);
 
-async function fetchChatbotConfig(phoneNumber: string) {
-    const response = await axios.get(`${CHATTRICK_BASE_URL}/api/integrations/whatsapp?phone_number=${phoneNumber}`);
-    console.log("Response:", response.data);
-    return response.data;
+async function fetchChatbotConfig(phoneNumber: string): Promise<ChatbotConfigData> {
+    const cachedConfig = chatbotConfigCache[phoneNumber];
+    if (cachedConfig && cachedConfig.expiresAt > Date.now()) {
+        console.log(`Using cached configuration for phone number: ${phoneNumber}`);
+        if (!cachedConfig.data) {
+            throw new Error("Cached config data is null");
+        }
+        console.log(cachedConfig);
+        return cachedConfig.data;
+    }
+
+    chatbotConfigCache[phoneNumber] = { data: null, expiresAt: 0, fetching: true };
+
+    try {
+        const response = await axios.get(
+            `${CHATTRICK_BASE_URL}/api/integrations/whatsapp?phone_number=${phoneNumber}`
+        );
+        console.log(`Fetched configuration for phone number ${phoneNumber}:`, response.data);
+
+        chatbotConfigCache[phoneNumber] = {
+            data: response.data,
+            expiresAt: Date.now() + 300000, // Cache expires in 5 minutes
+            fetching: false,
+        };
+        console.log(response);
+        return response.data;
+    } catch (error) {
+        console.error(`Failed to fetch configuration for phone number ${phoneNumber}:`, error);
+        chatbotConfigCache[phoneNumber] = { data: null, expiresAt: 0, fetching: false };
+        throw error;
+    }
 }
 
 function setupSocketConnection(botId: string): Promise<Socket> {
@@ -52,7 +107,6 @@ function setupSocketConnection(botId: string): Promise<Socket> {
             timeout: SOCKET_TIMEOUT,
         });
 
-        // Initialize socket cache entry immediately
         socketCache[botId] = {
             socket,
             lastUsed: Date.now(),
@@ -145,21 +199,18 @@ export async function POST(req: NextRequest) {
         const body = await req.json();
         const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
-        // Acknowledge the webhook immediately
         if (!message || message.type !== "text") {
             console.log("No valid message found, acknowledging immediately");
             return NextResponse.json({ status: "No valid message" }, { status: 200 });
         }
 
-        // Check for duplicate message
         if (processedMessages.has(message.id)) {
             console.log("Duplicate message detected, skipping processing");
             return NextResponse.json({ status: "Duplicate message, already processed" }, { status: 200 });
         }
 
-        // Mark message as processed and set expiration for deduplication
         processedMessages.add(message.id);
-        setTimeout(() => processedMessages.delete(message.id), 300000); // Remove after 5 minutes
+        setTimeout(() => processedMessages.delete(message.id), 300000);
 
         const businessPhoneNumber = body.entry?.[0]?.changes?.[0]?.value?.metadata?.display_phone_number;
         const phoneNumberId = body.entry?.[0]?.changes?.[0]?.value?.metadata?.phone_number_id;
@@ -175,37 +226,20 @@ export async function POST(req: NextRequest) {
 
         const { bot_id, graph_api_token } = config.data;
 
-        if (!graph_api_token || typeof graph_api_token !== "string" || graph_api_token.trim() === "") {
-            console.error("Invalid Graph API token:", graph_api_token);
-            return NextResponse.json({ error: "Invalid API token configuration" }, { status: 500 });
-        }
-
         let socketEntry = socketCache[bot_id];
-        if (!socketEntry || !socketEntry.isConnected) {
-            await setupSocketConnection(bot_id);
-            socketEntry = socketCache[bot_id];
-        }
+        const socket = socketEntry?.isConnected
+            ? socketEntry.socket
+            : await setupSocketConnection(bot_id);
 
+        socketEntry = socketCache[bot_id];
         socketEntry.lastUsed = Date.now();
-
-        const botReply = await getBotResponse(socketEntry.socket, message.text.body);
 
         const headers = {
             Authorization: `Bearer ${graph_api_token}`,
             "Content-Type": "application/json",
         };
 
-        await axios.post(
-            `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
-            {
-                messaging_product: "whatsapp",
-                to: message.from,
-                text: { body: botReply },
-                context: { message_id: message.id },
-            },
-            { headers }
-        );
-
+        // Send "seen" status
         await axios.post(
             `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
             {
@@ -215,6 +249,36 @@ export async function POST(req: NextRequest) {
             },
             { headers }
         );
+
+        // Send "is typing" status
+        const typingPromise = axios.post(
+            `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
+            {
+                messaging_product: "whatsapp",
+                recipient_type: "individual",
+                to: message.from,
+                type: "typing_on",
+            },
+            { headers }
+        );
+
+        // Wait for bot response
+        const botReply = await getBotResponse(socket, message.text.body);
+
+        // Send the bot's response and "typing off"
+        await Promise.all([
+            typingPromise,
+            axios.post(
+                `https://graph.facebook.com/v18.0/${phoneNumberId}/messages`,
+                {
+                    messaging_product: "whatsapp",
+                    to: message.from,
+                    text: { body: botReply },
+                    context: { message_id: message.id },
+                },
+                { headers }
+            ),
+        ]);
 
         return NextResponse.json({ status: "Success" }, { status: 200 });
     } catch (error) {
