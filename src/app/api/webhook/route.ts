@@ -4,7 +4,8 @@ import axios from "axios";
 const CHATTRICK_BASE_URL = process.env.CHATTRICK_BASE_URL as string;
 const WEBHOOK_VERIFY_TOKEN = process.env.WEBHOOK_VERIFY_TOKEN as string;
 const REQUEST_TIMEOUT = 30000; // General request timeout
-const REFERRER = process.env.REFERRER as string;
+const REFERRER =
+    (process.env.REFERRER as string) || "https://whatsapp.chattrick.com";
 
 // In-memory deduplication cache
 const processedMessages = new Set<string>();
