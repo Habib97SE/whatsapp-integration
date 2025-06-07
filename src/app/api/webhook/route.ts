@@ -71,7 +71,7 @@ async function getBotStreamingResponse(
             headers: {
                 "Content-Type": "application/json",
                 Accept: "text/event-stream",
-                Referer: REFERRER,
+                referer: REFERRER,
             },
             body: JSON.stringify(payload),
             signal: AbortSignal.timeout(REQUEST_TIMEOUT),
